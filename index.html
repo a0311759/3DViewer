@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>OBJ Viewer</title>
+<style>
+:root{--bg:#f4f5f7;--fg:#1b1d21;--mute:#6b7078;--panel:#fff;--line:#d9dce1;--accent:#2f6fed;--model:#b9c0cc;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#16181c;--fg:#e8eaed;--mute:#9097a1;--panel:#1f2227;--line:#32363d;--accent:#6b9bff;--model:#8e97a6}}
+:root[data-theme="dark"]{--bg:#16181c;--fg:#e8eaed;--mute:#9097a1;--panel:#1f2227;--line:#32363d;--accent:#6b9bff;--model:#8e97a6}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font:14px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;overflow:hidden}
+#view{position:absolute;inset:0;display:block;width:100%;height:100%;touch-action:none;cursor:grab}
+#view:active{cursor:grabbing}
+.bar{position:absolute;top:calc(12px + env(safe-area-inset-top,0px));left:12px;display:flex;gap:6px;flex-wrap:wrap;max-width:calc(100% - 24px)}
+button{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:7px 12px;cursor:pointer}
+button:hover{border-color:var(--mute)}
+button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+#info{position:absolute;left:12px;bottom:calc(12px + env(safe-area-inset-bottom,0px));color:var(--mute);font-size:12px;font-variant-numeric:tabular-nums;pointer-events:none}
+#empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;text-align:center;color:var(--mute);padding:24px}
+#empty b{display:block;color:var(--fg);font-size:16px;font-weight:600;margin-bottom:4px}
+#err{color:#d33}
+.drag #empty{color:var(--accent)}
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+<div class="bar">
+  <button id="open">Open file</button>
+  <button id="wire" aria-pressed="false">Wireframe</button>
+  <button id="reset">Reset view</button>
+  <input id="file" type="file" accept=".obj" hidden>
+</div>
+<div id="empty"><div><b>Drop an .obj file here</b><span id="msg">or use Open file</span></div></div>
+<div id="info"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const canvas=document.getElementById('view');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(45,1,0.01,1000);
+scene.add(new THREE.HemisphereLight(0xffffff,0x667080,0.7));
+const key=new THREE.DirectionalLight(0xffffff,0.8);scene.add(key);
+
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const material=new THREE.MeshStandardMaterial({color:0xb9c0cc,roughness:0.6,metalness:0.05,side:THREE.DoubleSide,flatShading:false});
+function applyTheme(){scene.background=new THREE.Color(css('--bg'));material.color.set(css('--model'))}
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change',applyTheme);
+applyTheme();
+
+let mesh=null,target=new THREE.Vector3(),dist=3,yaw=0.6,pitch=0.35,home={};
+function place(){
+  camera.position.set(
+    target.x+dist*Math.cos(pitch)*Math.sin(yaw),
+    target.y+dist*Math.sin(pitch),
+    target.z+dist*Math.cos(pitch)*Math.cos(yaw));
+  camera.lookAt(target);
+  key.position.copy(camera.position).add(new THREE.Vector3(2,3,1).multiplyScalar(dist*0.3));
+}
+function resize(){
+  const w=innerWidth,h=innerHeight;
+  renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();
+}
+addEventListener('resize',resize);resize();
+
+/* OBJ parser: v, vn, vt, f (triangles, quads, n-gons, negative indices) */
+function parseOBJ(text){
+  const v=[],vn=[],vt=[],pos=[],nor=[],uv=[];let hasN=true,hasT=true,faces=0;
+  const idx=(s,len)=>{const i=parseInt(s,10);return i<0?len+i:i-1};
+  for(const raw of text.split(/\r?\n/)){
+    const l=raw.trim();if(!l||l[0]==='#')continue;
+    const p=l.split(/\s+/),k=p[0];
+    if(k==='v')v.push(+p[1],+p[2],+p[3]);
+    else if(k==='vn')vn.push(+p[1],+p[2],+p[3]);
+    else if(k==='vt')vt.push(+p[1],+p[2]);
+    else if(k==='f'){
+      const c=p.slice(1).map(s=>{const a=s.split('/');
+        return{v:idx(a[0],v.length/3),t:a[1]?idx(a[1],vt.length/2):-1,n:a[2]?idx(a[2],vn.length/3):-1}});
+      for(let i=1;i<c.length-1;i++){
+        for(const q of [c[0],c[i],c[i+1]]){
+          pos.push(v[q.v*3],v[q.v*3+1],v[q.v*3+2]);
+          if(q.n>=0)nor.push(vn[q.n*3],vn[q.n*3+1],vn[q.n*3+2]);else hasN=false;
+          if(q.t>=0)uv.push(vt[q.t*2],vt[q.t*2+1]);else hasT=false;
+        }
+        faces++;
+      }
+    }
+  }
+  if(!pos.length)throw new Error('No faces found. Is this a valid .obj file?');
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  if(hasN)g.setAttribute('normal',new THREE.Float32BufferAttribute(nor,3));else g.computeVertexNormals();
+  if(hasT)g.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+  g.userData={verts:v.length/3,faces};
+  return g;
+}
+
+function show(geo,name){
+  if(mesh){scene.remove(mesh);mesh.geometry.dispose()}
+  geo.computeBoundingBox();
+  const c=geo.boundingBox.getCenter(new THREE.Vector3()),s=geo.boundingBox.getSize(new THREE.Vector3());
+  geo.translate(-c.x,-c.y,-c.z);
+  const r=Math.max(s.x,s.y,s.z)||1;
+  mesh=new THREE.Mesh(geo,material);scene.add(mesh);
+  camera.near=r/1000;camera.far=r*100;camera.updateProjectionMatrix();
+  target.set(0,0,0);dist=r*1.9;yaw=0.6;pitch=0.35;home={dist,yaw,pitch};
+  place();
+  document.getElementById('empty').style.display='none';
+  document.getElementById('info').textContent=
+    `${name}  ·  ${geo.userData.verts.toLocaleString()} vertices  ·  ${geo.userData.faces.toLocaleString()} triangles  ·  ${s.x.toPrecision(3)} × ${s.y.toPrecision(3)} × ${s.z.toPrecision(3)}`;
+}
+
+function load(file){
+  if(!file)return;
+  const msg=document.getElementById('msg');
+  file.text().then(t=>{
+    try{show(parseOBJ(t),file.name)}
+    catch(e){document.getElementById('empty').style.display='flex';msg.id='err';msg.textContent=e.message;setTimeout(()=>{msg.id='msg'},50)}
+  });
+}
+
+/* UI */
+const fileIn=document.getElementById('file');
+document.getElementById('open').onclick=()=>fileIn.click();
+fileIn.onchange=()=>{load(fileIn.files[0]);fileIn.value=''};
+const wire=document.getElementById('wire');
+wire.onclick=()=>{material.wireframe=!material.wireframe;wire.setAttribute('aria-pressed',material.wireframe)};
+document.getElementById('reset').onclick=()=>{if(!mesh)return;({dist,yaw,pitch}=home);target.set(0,0,0);place()};
+addEventListener('dragover',e=>{e.preventDefault();document.body.classList.add('drag')});
+addEventListener('dragleave',()=>document.body.classList.remove('drag'));
+addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('drag');load(e.dataTransfer.files[0])});
+
+/* Orbit / pan / zoom */
+const ptrs=new Map();let lastPinch=0;
+canvas.addEventListener('contextmenu',e=>e.preventDefault());
+canvas.addEventListener('pointerdown',e=>{canvas.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,e)});
+canvas.addEventListener('pointerup',e=>{ptrs.delete(e.pointerId);lastPinch=0});
+canvas.addEventListener('pointermove',e=>{
+  const prev=ptrs.get(e.pointerId);if(!prev)return;
+  const dx=e.clientX-prev.clientX,dy=e.clientY-prev.clientY;
+  ptrs.set(e.pointerId,e);
+  if(ptrs.size===2){
+    const [a,b]=[...ptrs.values()],d=Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+    if(lastPinch)dist*=lastPinch/d;lastPinch=d;place();return;
+  }
+  if(e.buttons&2||e.shiftKey){
+    const k=dist*0.0016,right=new THREE.Vector3().setFromMatrixColumn(camera.matrix,0),up=new THREE.Vector3().setFromMatrixColumn(camera.matrix,1);
+    target.addScaledVector(right,-dx*k).addScaledVector(up,dy*k);
+  }else{
+    yaw-=dx*0.006;pitch=Math.max(-1.5,Math.min(1.5,pitch+dy*0.006));
+  }
+  place();
+});
+canvas.addEventListener('wheel',e=>{e.preventDefault();dist*=Math.exp(e.deltaY*0.001);place()},{passive:false});
+
+(function loop(){requestAnimationFrame(loop);renderer.render(scene,camera)})();
+place();
+</script>
+</body>
+</html>
